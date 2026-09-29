@@ -34,33 +34,35 @@ sequenceDiagram
             DON->>LOG: POST /depositos/{depositoID}/donacion {donacionID, productoID, cantidad}
             activate LOG
             LOG->>LOG: valida capacidad del depósito,<br/>crea Paquete (PENDIENTE), guarda Depósito
-            Note over LOG: @TransactionalEventListener(AFTER_COMMIT):<br/>solo se publica si la transacción de<br/>Logística confirmó
+            Note over LOG: @TransactionalEventListener(AFTER_COMMIT):<br/>solo se publica si la transacción confirmó
             LOG->>MQ: publica DonacionPendienteMessage<br/>(incluye el traceId del request original)
             LOG-->>DON: 202 Accepted (DepositoDTO)
             deactivate LOG
             DON-->>Cliente: 201 Created (DonacionDTO)
             deactivate DON
 
-            Note over MQ,WRK: --- a partir de acá es asíncrono:<br/>el cliente ya recibió su respuesta ---
+            Note over MQ,WRK: --- asíncrono: cliente ya recibió su respuesta ---
             MQ->>WRK: entrega el mensaje
             activate WRK
             WRK->>DYE: GET /necesidades?productoSolicitadoID={productoID}
             activate DYE
-            DYE-->>WRK: List de NecesidadMaterialDTO insatisfechas
+            DYE-->>WRK: List de NecesidadMaterialDTO
             deactivate DYE
+            
             loop por cada necesidad candidata
                 WRK->>LOG: GET /internal/matchmaking/necesidades/{id}/cantidad-asignada
                 activate LOG
-                LOG-->>WRK: cantidad ya comprometida
+                LOG-->>WRK: cantidad comprometida
                 deactivate LOG
             end
-            WRK->>WRK: corre el algoritmo de matchmaking<br/>(FIFO / el configurado en el depósito)
-            WRK->>LOG: POST /internal/matchmaking/resultados<br/>{depositoId, paqueteId, necesidadId, cantidadAsignada, cantidadSobrante}
+            
+            WRK->>WRK: corre algoritmo matchmaking
+            WRK->>LOG: POST /internal/matchmaking/resultados
             activate LOG
-            alt hay necesidad compatible
-                LOG->>LOG: crea Asignacion (ASIGNADA), paquete pasa a ASIGNADO
-            else sin necesidad compatible
-                LOG->>LOG: paquete pasa a EN_STOCK<br/>(queda disponible para asignación directa,<br/>ver funcionalidad 5)
+            alt necesidad compatible
+                LOG->>LOG: crea Asignacion (ASIGNADA)
+            else sin compatibilidad
+                LOG->>LOG: paquete → EN_STOCK
             end
             LOG-->>WRK: respuesta
             deactivate LOG
