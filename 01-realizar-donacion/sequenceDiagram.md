@@ -8,51 +8,43 @@ sequenceDiagram
     participant MQ as RabbitMQ
     participant WRK as Logística (Worker)
 
-    Cliente->>DON: POST /donaciones
-    activate DON
-    DON->>DON: valida cantidad > 0
+    Cliente->>DON: POST /donaciones {donadorID, depositoID, productoID, cantidad}
+    DON->>DON: valida cantidad > 0, producto existe localmente
 
     DON->>DYE: GET /donadores/{donadorID}
     alt donador no existe
         DYE-->>DON: 404
-        DON-->>Cliente: 422
-        deactivate DON
+        DON-->>Cliente: 422 (DonacionRechazadaException)
     else donador existe
         DYE-->>DON: 200 DonadorDTO
-        DON->>DYE: GET /donadores/{id}/puede-donar
+        DON->>DYE: GET /donadores/{donadorID}/puede-donar
+        DYE-->>DON: true / false
         alt no puede donar
-            DON-->>Cliente: 422
-            deactivate DON
+            DON-->>Cliente: 422 (DonacionRechazadaException)
         else puede donar
-            DON->>DON: crea Donacion
-            DON->>LOG: POST /depositos/{id}/donacion
-            activate LOG
-            LOG->>LOG: valida capacidad,<br/>crea Paquete
-            LOG->>MQ: publica evento
-            LOG-->>DON: 202 Accepted
-            deactivate LOG
-            DON-->>Cliente: 201 Created
-            deactivate DON
+            DON->>DON: crea Donacion (estado=INGRESADA), guarda en BD
+            DON->>LOG: POST /depositos/{depositoID}/donacion {donacionID, productoID, cantidad}
+            LOG->>LOG: valida capacidad del depósito,<br/>crea Paquete (PENDIENTE), guarda Depósito
+            Note over LOG: @TransactionalEventListener(AFTER_COMMIT):<br/>solo se publica si la transacción de<br/>Logística confirmó
+            LOG->>MQ: publica DonacionPendienteMessage<br/>(incluye el traceId del request original)
+            LOG-->>DON: 202 Accepted (DepositoDTO)
+            DON-->>Cliente: 201 Created (DonacionDTO)
 
-            Note over MQ,WRK: --- asíncrono (cliente ya recibió) ---
-            MQ->>WRK: entrega mensaje
-            activate WRK
-            WRK->>DYE: GET /necesidades
-            DYE-->>WRK: List necesidades
-            loop por cada necesidad
-                WRK->>LOG: GET cantidad-asignada
-                LOG-->>WRK: cantidad
+            Note over MQ,WRK: --- a partir de acá es asíncrono:<br/>el cliente ya recibió su respuesta ---
+            MQ->>WRK: entrega el mensaje
+            WRK->>DYE: GET /necesidades?productoSolicitadoID={productoID}
+            DYE-->>WRK: List de NecesidadMaterialDTO insatisfechas
+            loop por cada necesidad candidata
+                WRK->>LOG: GET /internal/matchmaking/necesidades/{id}/cantidad-asignada
+                LOG-->>WRK: cantidad ya comprometida
             end
-            WRK->>WRK: ejecuta matchmaking
-            WRK->>LOG: POST /resultados
-            activate LOG
-            alt hay compatibilidad
-                LOG->>LOG: crea Asignacion
-            else sin compatibilidad
-                LOG->>LOG: paquete → EN_STOCK
+            WRK->>WRK: corre el algoritmo de matchmaking<br/>(FIFO / el configurado en el depósito)
+            WRK->>LOG: POST /internal/matchmaking/resultados<br/>{depositoId, paqueteId, necesidadId, cantidadAsignada, cantidadSobrante}
+            alt hay necesidad compatible
+                LOG->>LOG: crea Asignacion (ASIGNADA), paquete pasa a ASIGNADO
+            else sin necesidad compatible
+                LOG->>LOG: paquete pasa a EN_STOCK<br/>(queda disponible para asignación directa,<br/>ver funcionalidad 5)
             end
-            deactivate LOG
-            deactivate WRK
         end
     end
 ```
